@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Your Profile</title>
+</head>
+<body>
+<h1> {{.Username}} </h1>
+<img src="data:image/jpg;base64,{{.Picture}}">
+<h2> Nickname: {{.Nickname}} </h2>
+<form method="GET" action="http://127.0.0.1:8080/edit/">
+    <input type="submit" value="Edit Profile" />
+</form>
+</body>
+</html>

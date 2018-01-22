@@ -1,0 +1,16 @@
+<html>
+<head>
+    <title>Edit profile</title>
+</head>
+<body>
+<h1> {{.Username}} </h1>
+<form method="post" enctype="multipart/form-data" action="http://127.0.0.1:8080/edit/">
+    <input type="hidden" name="token" value="{{.Token}}"/>
+    <label><b>New Profile Picture</b></label>
+    <input type="file" name="uploadfile" />
+    <label><b>Nickname</b></label>
+    <input type="text" placeholder="New Nickname" name="nickname">
+    <input type="submit" value="upload"/>
+</form>
+</body>
+</html>

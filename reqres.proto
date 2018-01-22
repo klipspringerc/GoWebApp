@@ -1,0 +1,60 @@
+syntax = "proto3";
+package main;
+
+enum Command{
+  LOGIN = 0;
+  UPDATEPICTURE = 1;
+  UPDATENICKNAME = 2;
+  UPDATEBOTH = 3;
+  GETPROFILE = 4;
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message UpdatePicRequest {
+  string username = 1;
+  bytes picture = 2;
+}
+
+message UpdateNickRequest {
+  string username = 1;
+  string nickname = 2;
+}
+
+message UpdateBothRequest {
+  string username = 1;
+  string nickname = 2;
+  bytes picture = 3;
+}
+
+message GetProfileRequest {
+  string username = 1;
+}
+
+message Request {
+  Command command = 1;
+  string token = 2;
+  oneof req {
+    LoginRequest login = 3;
+    UpdatePicRequest updatepicture = 4;
+    UpdateNickRequest updatenickname = 5;
+    UpdateBothRequest updateboth = 6;
+    GetProfileRequest getprofile = 7;
+  }
+}
+
+message QueryResponse {
+  string token = 1;
+  bool status = 2;
+  string username = 3;
+  string nickname = 4;
+  bytes picture = 5;
+}
+
+message AckResponse {
+  string token = 1;
+  bool status = 2;
+}
