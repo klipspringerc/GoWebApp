@@ -11,6 +11,7 @@ import (
 )
 
 func main() {
+	// for faster request
 	http.DefaultTransport.(*http.Transport).MaxIdleConns = 1000
 	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 500
     users := getUserList(200)
@@ -25,7 +26,7 @@ func main() {
 	for i := 0; i < 200 ;i++ {
     	t = <- tsChannel
 	}
-	fmt.Println(t)
+	fmt.Println("end:", t)
 }
 
 func makeRequest(username string, tsChan chan time.Time) {
@@ -71,10 +72,6 @@ func getUserList(n int) []string {
 		return nil
 	}
 	users := make([]string, n)
-	//for i := 0; i <= n; rows.Next() {
-     //   rows.Scan(&users[i])
-     //   i++
-	//}
 	i := 0
 	for rows.Next() {
 		rows.Scan(&users[i])

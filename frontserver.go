@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"github.com/fatih/pool"
 	"github.com/go-redis/redis"
+	"github.com/go-redis/cache"
 	"github.com/dgrijalva/jwt-go"
 	"image"
     "github.com/nfnt/resize"
@@ -24,6 +25,7 @@ import (
 	_ "image/jpeg"
 	_ "image/gif"
 	"image/png"
+	"github.com/vmihailenco/msgpack"
 )
 
 type Profile struct {
@@ -35,31 +37,29 @@ type Profile struct {
 var templates = template.Must(template.ParseFiles("./templates/loginform.html", "./templates/profile.html", "./templates/uploadform.html", "./templates/loginsuccess.html"))
 var factory = func() (net.Conn, error) {return net.Dial("tcp", "localhost:3000")}
 var p pool.Pool
-var client *redis.Client
-
-type cache_map struct {
-	mux sync.Mutex
-	cache map[string]string
-}
+var codec *cache.Codec
+var redisMutex sync.Mutex
 
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	if login, username := checkLogin(r); login {
-		//fmt.Println("method:", r.Method)
 		if r.Method == "GET" {
 			curtime := time.Now().Unix()
 			h := md5.New()
 			io.WriteString(h, strconv.FormatInt(curtime, 10))
-			payload := map[string]interface{}{"Token": getCSRFToken(), "Username": "Kevin"}
+			payload := map[string]interface{}{"Token": getCSRFToken(), "Username": username}
 			renderTemplates(w, "uploadform.html", payload)
 		} else {
 			err := r.ParseMultipartForm(32 << 20)
 			if err != nil {
 				fmt.Println("Parse Multipart Form Error")
+				http.Redirect(w, r, "/profile/", http.StatusFound)
+				return
 			}
 			file, _, _ := r.FormFile("uploadfile")
-
-			//fmt.Printf("empty file: %T %s", file)
 			nickname := template.HTMLEscapeString(r.FormValue("nickname"))
+			if len(nickname) > 20 {
+				nickname = nickname[:20]
+			}
 			csrfToken := template.HTMLEscapeString(r.FormValue("token"))
 			if !checkCSRF(csrfToken) {
 				http.Redirect(w, r, "/profile/", http.StatusFound)
@@ -108,10 +108,10 @@ func updatePicture(username string, picFile multipart.File) {
 		},
 	}
 	res := protoBufTCPIn(req)
-	fmt.Println("response", res.Status)
 	if !res.Status {
-		fmt.Println(res.Status)
 		fmt.Println("Update failure")
+	} else {
+		updateRedisCache(Profile{Username: username, Nickname: "", Picture: base64.StdEncoding.EncodeToString(newImgBytes)})
 	}
 }
 
@@ -130,6 +130,8 @@ func updateNickname(username string, nickname string) {
 	res := protoBufTCPIn(req)
 	if !res.Status {
 		fmt.Println("Update failure")
+	} else {
+		updateRedisCache(Profile{Username: username, Nickname:nickname, Picture:""})
 	}
 }
 
@@ -155,25 +157,20 @@ func updateProfile(username string, nickname string, picFile multipart.File) {
 	res := protoBufTCPIn(req)
 	if !res.Status {
 		fmt.Println("Update failure")
+	} else {
+		updateRedisCache(Profile{Username: username, Nickname:nickname, Picture:base64.StdEncoding.EncodeToString(newImgBytes)})
 	}
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
-	//fmt.Println("method:", r.Method)
 	if login, username := checkLogin(r); login {
 		data := map[string]string{"Username": username}
 		renderTemplates(w, "loginsuccess.html", data)
 		return
 	}
 	if r.Method == "GET" {
-		//crutime := time.Now().Unix()
-		//h := md5.New()
-		//io.WriteString(h, strconv.FormatInt(crutime, 10))
-		//token := fmt.Sprintf("%x", h.Sum(nil))
-		//payload := map[string]interface{}{"Token": token, "Username": "Kevin"}
 		renderTemplates(w, "loginform.html", nil)
 	} else {
-		fmt.Println("HTTP: handle login request")
 		username := template.HTMLEscapeString(r.FormValue("username"))
 		password := template.HTMLEscapeString(r.FormValue("password"))
 		// redis experiment
@@ -209,8 +206,11 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 func profileHandler(w http.ResponseWriter, r *http.Request) {
     if login, username := checkLogin(r); login {
-		//img, err := png.Decode(f)
-		//fmt.Printf("type %T \n", img)
+    	// check redis cache first
+		if profile, err := checkRedisCache(username); err == nil {
+			renderTemplates(w, "profile.html", profile)
+			return
+		}
 		getReq := &GetProfileRequest{
 			Username: username,
 		}
@@ -223,10 +223,9 @@ func profileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		res := protoBufTCPGetProfile(req)
 		if res.Status == true {
-			picBytes := res.Picture
-			nickname := res.Nickname
-			rawImagestr := base64.StdEncoding.EncodeToString(picBytes)  // transfer to raw image
-			profile := Profile{Username: username, Nickname: nickname, Picture: rawImagestr}
+			rawImagestr := base64.StdEncoding.EncodeToString(res.Picture)  // transfer to raw image
+			profile := Profile{Username: username, Nickname: res.Nickname, Picture: rawImagestr}
+			redisCacheProfile(profile)
 			renderTemplates(w, "profile.html", profile)
 		} else {
 			logoutUser(w, username)
@@ -244,7 +243,6 @@ func protoBufTCPIn (req *Request) *AckResponse {
 		return nil
 	}
 	//conn, err := net.Dial("tcp", "localhost:3000")
-
 	conn, err := p.Get()
     if p == nil {
     	fmt.Println("pool init error")
@@ -293,8 +291,6 @@ func protoBufTCPGetProfile (req *Request) *QueryResponse {
 		fmt.Printf("Marshal Error %v %T \n", err, err)
 		return nil
 	}
-	//conn, err := net.Dial("tcp", "localhost:3000")
-
 	conn, err := p.Get()
 	defer conn.Close()
 	if err != nil {
@@ -331,27 +327,96 @@ func protoBufTCPGetProfile (req *Request) *QueryResponse {
 	return res
 }
 
-func runFrontServer() {
-	var err error
-	p, err = pool.NewChannelPool(200, 1200, factory)
-	if err != nil {
-		fmt.Println("Create channel pool error", err)
-	}
-	client = redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
-	})
-	http.HandleFunc("/login/", loginHandler)
-	http.HandleFunc("/profile/", profileHandler)
-	http.HandleFunc("/edit/", uploadHandler)
-	http.ListenAndServe(":8080", nil)
-}
-
 func renderTemplates(w http.ResponseWriter, name string, data interface{}) {
 	err := templates.ExecuteTemplate(w, name, data)
 	if err != nil {
 		log.Println("unable to execute template.", err)
+	}
+}
+
+func loginUser(w http.ResponseWriter, username string) {
+	signBytes := []byte("nBewzo9SueQ")
+	// Create the Claims
+	claims := &jwt.StandardClaims{
+		ExpiresAt: int64(30 * time.Second),
+		Issuer:    username,
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, _ := token.SignedString(signBytes)   // signed by a string
+	cookie := http.Cookie{Name: "username", Value: tokenStr, Path: "/", Expires: time.Now().Add(1 * 60 * time.Second)}
+	http.SetCookie(w, &cookie)
+}
+
+func logoutUser(w http.ResponseWriter, username string) {
+	cookie := http.Cookie{Name: username, Value: "", Path: "/", MaxAge: -10, Expires: time.Now()}
+	http.SetCookie(w, &cookie)
+}
+
+func checkLogin(r *http.Request) (bool, string) {
+	cookie, _ := r.Cookie("username")
+	if cookie != nil {
+		token, err := jwt.ParseWithClaims(cookie.Value, &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
+			return []byte("nBewzo9SueQ"), nil
+		})
+		if err == nil {
+			claims, ok := token.Claims.(*jwt.StandardClaims)
+			if ok && token.Valid {
+				return true, claims.Issuer
+			}
+		}
+	}
+	return false, ""
+}
+
+func redisLogin(username string, password string) {
+	err := codec.Set(&cache.Item{
+		Key:        username,
+		Object:     password,
+		Expiration: 30 * time.Second,   // a relatively short time for testing
+	})
+	if err != nil {
+		fmt.Println("Redis caching error")
+	}
+}
+
+func checkRedisLogin(username string, password string) bool {
+    var pwd string
+	if err := codec.Get(username, &pwd); err == nil && pwd == password {
+		return true
+	}
+	return false
+}
+
+func redisCacheProfile(p Profile) {
+	err := codec.Set(&cache.Item{
+		Key: p.Username + "<profile/>",
+		Object: p,
+		Expiration: 30 * time.Second,   // a relatively short time for testing
+	})
+	if err != nil {
+		fmt.Println("Redis caching error")
+	}
+}
+
+func checkRedisCache(username string) (p Profile, err error) {
+	if err = codec.Get(username+"<profile/>", &p); err == nil {
+		return p, nil
+	}
+	return p, err
+}
+
+func updateRedisCache(newP Profile) {
+	redisMutex.Lock()
+	defer redisMutex.Unlock()
+	var originP Profile
+	if err := codec.Get(newP.Username+"<profile/>", &originP); err == nil {
+		switch  {
+		case newP.Nickname == "":
+			newP.Nickname = originP.Nickname
+		case newP.Picture == "":
+		    newP.Picture = originP.Picture
+		}
+		redisCacheProfile(newP)
 	}
 }
 
@@ -365,40 +430,6 @@ func getCSRFToken() (ss string) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	ss, _ = token.SignedString(mySigningKey)   // signed by a string
 	return
-}
-
-func checkLogin(r *http.Request) (bool, string) {
-	cookie, _ := r.Cookie("username")
-	if cookie == nil {
-		return false, ""
-	} else {
-		return true, cookie.Value
-	}
-}
-
-func redisLogin(username string, password string) {
-	err := client.Set(username, password, 40*time.Second).Err()
-	if err != nil {
-		fmt.Println("Redis caching error")
-	}
-}
-
-func checkRedisLogin(username string, password string) bool {
-	pwd, err := client.Get(username).Result()
-	if err == nil && pwd == password {
-		return true
-	}
-	return false
-}
-
-func loginUser(w http.ResponseWriter, username string) {
-	cookie := http.Cookie{Name: "username", Value: username, Path: "/", Expires: time.Now().Add(1 * 60 * time.Second)}
-	http.SetCookie(w, &cookie)
-}
-
-func logoutUser(w http.ResponseWriter, username string) {
-	cookie := http.Cookie{Name: "username", Value: username, Path: "/", MaxAge: -10, Expires: time.Now()}
-	http.SetCookie(w, &cookie)
 }
 
 func checkCSRF(ss string) bool {
@@ -418,11 +449,9 @@ func checkCSRF(ss string) bool {
 func compressImage(originImg []byte, size uint) ([]byte, error) {
 	image, _, err := image.Decode(bytes.NewReader(originImg))
 	if err != nil {
-		//image, err = jpeg.Decode(bytes.NewReader(originImg))
 		fmt.Println("image compression: decode error")
         return nil, fmt.Errorf("Decode error")
 	}
-	//fmt.Printf("%T,  \n %v \n", image, image)
 	newImg := resize.Resize(size, 0, image, resize.Bilinear) // current best compression result
 	buf := new(bytes.Buffer)
 	err = png.Encode(buf, newImg)
@@ -433,12 +462,43 @@ func compressImage(originImg []byte, size uint) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-
+func runFrontServer() {
+	var err error
+	p, err = pool.NewChannelPool(200, 1200, factory)
+	if err != nil {
+		fmt.Println("Create channel pool error", err)
+	}
+	//client = redis.NewClient(&redis.Options{
+	//	Addr:     "localhost:6379",
+	//	Password: "", // no password set
+	//	DB:       0,  // use default DB
+	//})
+	ring := redis.NewRing(&redis.RingOptions{
+		Addrs: map[string]string {
+			"server1": "localhost:6379",
+		},
+	})
+	codec = &cache.Codec{
+		Redis: ring,
+		Marshal: func(s interface{}) ([]byte, error) {
+			return msgpack.Marshal(s)
+		},
+		Unmarshal: func(b []byte, s interface{}) error {
+			return msgpack.Unmarshal(b, s)
+		},
+	}
+	codec.UseLocalCache(20000, 40 * time.Second)
+	http.HandleFunc("/login/", loginHandler)
+	http.HandleFunc("/profile/", profileHandler)
+	http.HandleFunc("/edit/", uploadHandler)
+	http.ListenAndServe(":8080", nil)
+}
 
 func main() {
-	wg := &sync.WaitGroup{}
-	wg.Add(2)
-	go runTCPServer()
-	go runFrontServer()
-	wg.Wait()
+	//wg := &sync.WaitGroup{}
+	//wg.Add(2)
+	//go runTCPServer()
+	//go runFrontServer()
+	//wg.Wait()
+	runFrontServer()
 }

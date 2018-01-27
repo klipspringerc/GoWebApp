@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
 	//"sync"
 	//"github.com/golang/protobuf/proto"
 	"database/sql"
@@ -16,12 +17,14 @@ import (
 	"bytes"
 	"time"
 	"crypto/sha256"
+	"io/ioutil"
 )
 
 const (
 	CONN_HOST = "localhost"
 	CONN_PORT = "3000"
 	CONN_TYPE = "tcp"
+	IMG_DIR = "./static/image/"
 )
 
 func runTCPServer() {
@@ -40,8 +43,9 @@ func runTCPServer() {
 	} else {
 		defer db.Close()
 	}
-	db.SetMaxOpenConns(80)
+	db.SetMaxOpenConns(130)
 	db.SetMaxIdleConns(50)
+	go cleanDBStatic(db)
 	fmt.Println("Listening on " + CONN_HOST + ":" + CONN_PORT)
 	for {
 		// Listen for an incoming connection.
@@ -58,29 +62,24 @@ func runTCPServer() {
 func handleRequest(db *sql.DB, conn net.Conn) {
 	defer conn.Close()
 	conn.SetReadDeadline(time.Time{})
-	//fmt.Println("error in setting readdeadline", err)
 	// Make a buffer to hold incoming data.
+	// 18kb
 	buf := make([]byte, 18432)
-	// Read the incoming connection into the buffer.
-	//fmt.Println("connection set")
 	for {
 		reqLen, err := conn.Read(buf)
 		if err != nil {
 			e, ok := err.(net.Error)
 			if !ok || !e.Temporary() {
-				//fmt.Println("TCP: Network error", err)
+				fmt.Println("TCP: Network error", err)
+				return
 			}
 			time.Sleep(1*time.Microsecond)
-			//fmt.Println("Error reading:", err.Error())
 		} else {
-			//fmt.Printf("tcp-handleRequest resLen %d\n", reqLen)
 			req := &Request{}
 			err := proto.Unmarshal(buf[:reqLen], req)
 			if err != nil {
 				fmt.Println("TCP unmarshal error", err)
 			}
-			//fmt.Printf("tcp-handleRequest\n %v", rec)
-			//Send a response back to person contacting us.
 			if req == nil {
 				fmt.Println("nil request detected, reqLen", reqLen)
 				continue
@@ -126,7 +125,7 @@ func handleProfileRequest(db *sql.DB, req *Request, conn net.Conn) {
 	success := false
 	username := req.GetGetprofile().Username
 	if nickname, pictureName, err := dbRetrieveProfile(db, username); err == nil {
-		if file, err := os.Open("./static/image/" + pictureName); err == nil {
+		if file, err := os.Open(path.Join(IMG_DIR, pictureName)); err == nil {
 			buffer := new(bytes.Buffer)
 			io.Copy(buffer, file)
 			res := &QueryResponse{
@@ -151,7 +150,7 @@ func handleProfileRequest(db *sql.DB, req *Request, conn net.Conn) {
 			Nickname: "",
 			Picture: nil,
 		}
-		success = protoBufHTTP(res, conn)
+		protoBufHTTP(res, conn)
 	}
 }
 
@@ -181,7 +180,7 @@ func getUpdateInfo(req *Request) (string, string, string) {
 
 func savePicture(fileBytes []byte) string {
 	pictureID := getId()
-	f, err := os.OpenFile("./static/image/"+pictureID, os.O_WRONLY|os.O_CREATE, 0666)
+	f, err := os.OpenFile(path.Join(IMG_DIR, pictureID), os.O_WRONLY|os.O_CREATE, 0666)
 	if err != nil {
 		fmt.Println(err)
 		return ""
@@ -213,15 +212,7 @@ func CheckPasswordHashSHA(password, hash string) bool {
 }
 
 func dbLoginLookUp(db *sql.DB, username string, attemptpwd string) (bool, error){
-	//fmt.Println("SQL looking up", username, "pwd", attemptpwd)
-	//stmtOut,err := db.Prepare("SELECT password FROM useraccounts WHERE username = ?")
-	//if err != nil {
-	//	fmt.Println("SQL Statement Error", err)
-	//	return false, fmt.Errorf("SQL Error")
-	//}
 	var password string
-	//err = stmtOut.QueryRow(username).Scan(&password)
-	//stmtOut.Close()
 	err := db.QueryRow("SELECT password FROM useraccounts WHERE username = ?", username).Scan(&password)
 	if err != nil {
 		fmt.Println("Login Query Error", err)
@@ -323,6 +314,32 @@ func protoBufHTTP (res interface{}, conn net.Conn) bool {
 	return true
 }
 
+func cleanDBStatic (db *sql.DB) {
+	rows, err := db.Query("SELECT DISTINCT picture FROM useraccounts")
+	if err != nil {
+		fmt.Println("SQL query error", err)
+	}
+	picSet := make(map[string]bool)
+	var picName string
+	for rows.Next() {
+	    rows.Scan(&picName)
+	    picSet[picName] = true
+	}
+	picFiles, err := ioutil.ReadDir(IMG_DIR)
+	if err != nil {
+		fmt.Println("file io error", err)
+	}
+	for _, f := range picFiles {
+		if _, ok := picSet[f.Name()]; !ok {
+			err := os.Remove(path.Join(IMG_DIR, f.Name()))
+			if err != nil {
+				fmt.Println("file io error", err)
+			}
+		}
+	}
+    fmt.Println("Static files cleaned")
+}
+
 func testDBLogin() {
 	db, _ := sql.Open("mysql", "admin:1991@/serverdb")
 	fmt.Println(dbLoginLookUp(db, "kevin", "1234"))
@@ -330,8 +347,8 @@ func testDBLogin() {
 	fmt.Println(dbLoginLookUp(db, "kevin", "7659"))
 }
 
-//func main() {
-//	runTCPServer()
-//}
+func main() {
+	runTCPServer()
+}
 
 

@@ -6,11 +6,16 @@
 <h1> {{.Username}} </h1>
 <form method="post" enctype="multipart/form-data" action="http://127.0.0.1:8080/edit/">
     <input type="hidden" name="token" value="{{.Token}}"/>
-    <label><b>New Profile Picture</b></label>
-    <input type="file" name="uploadfile" />
+    <label><b>New Profile Picture</b> (Max 32MB) </label>
+    <input type="file" name="uploadfile"/>
     <label><b>Nickname</b></label>
     <input type="text" placeholder="New Nickname" name="nickname">
-    <input type="submit" value="upload"/>
+    <br>
+    <br>
+    <input type="submit" value="Upload"/>
+</form>
+<form method="GET" action="http://127.0.0.1:8080/profile/">
+    <input type="submit" value="Cancel"/>
 </form>
 </body>
 </html>
