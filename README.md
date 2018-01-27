@@ -1,4 +1,4 @@
-# Entry Task
+# Simple Golang Server
 
 ## Dependencies
 * github.com/golang/protobuf/proto
